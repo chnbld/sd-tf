@@ -1,6 +1,8 @@
+import tensorflow as tf
 import keras.optimizers
 import scipy.io
 from keras.models import model_from_json
+from keras.losses import KLDivergence
 import os
 
 import numpy as np
@@ -26,7 +28,7 @@ def load_model(json_path):
     model = model_from_json(open(json_path).read())
     return model
 
-def load_batch_train(normal_path, normal_list, abnormal_path, abnormal_list):
+def load_batch_train(normal_path, normal_list, abnormal_path, abnormal_list, mirror_normal_path, mirror_abnormal_path):
 
     batchsize=60
     n_exp = int(batchsize/2)
@@ -43,14 +45,14 @@ def load_batch_train(normal_path, normal_list, abnormal_path, abnormal_list):
     for video_idx in abnor_list:
         video_path = os.path.join(abnormal_path, abnormal_list[video_idx])
         with open(video_path, "rb") as f:
-            feats = np.load(f)
+            feats = np.loadtxt(f)
         abnormal_feats.append(feats)
 
     normal_feats = []
     for video_idx in norm_list:
         video_path = os.path.join(normal_path, normal_list[video_idx])
         with open(video_path, "rb") as f:
-            feats = np.load(f)
+            feats = np.loadtxt(f)
         normal_feats.append(feats)
 
 
@@ -59,13 +61,43 @@ def load_batch_train(normal_path, normal_list, abnormal_path, abnormal_list):
 
     all_labels[:32*n_exp] = 1
 
-    return  all_feats, all_labels
+    abnormal_feats = []
+    for video_idx in abnor_list:
+        video_path = os.path.join(mirror_abnormal_path, abnormal_list[video_idx])
+        with open(video_path, "rb") as f:
+            feats = np.loadtxt(f)
+        abnormal_feats.append(feats)
+
+    normal_feats = []
+    for video_idx in norm_list:
+        video_path = os.path.join(mirror_normal_path, normal_list[video_idx])
+        with open(video_path, "rb") as f:
+            feats = np.loadtxt(f)
+        normal_feats.append(feats)
 
 
-def custom_objective(y_true, y_pred):
+    all_feats_mirror = np.vstack((*abnormal_feats, *normal_feats))
+    all_labels_mirror = np.zeros(32*batchsize, dtype='uint8')
 
-    y_true = K.reshape(y_true, [-1])
-    y_pred = K.reshape(y_pred, [-1])
+    all_labels_mirror[:32*n_exp] = 1
+
+    feats = np.vstack((*all_feats, *all_feats_mirror))
+    labels = np.vstack((*all_labels, *all_labels_mirror))
+
+    #print(feats.shape)
+    #print(labels.shape)
+
+    return  feats, labels
+
+
+def custom_objective(y_true1, y_pred1):
+
+    y_true1 = K.reshape(y_true1, [-1])
+    y_pred1 = K.reshape(y_pred1, [-1])
+    y_true = y_true1[:1920]
+    y_true_mirror = y_true1[1920:]
+    y_pred = y_pred1[:1920]
+    y_pred_mirror = y_pred1[1920:]
     n_seg = 32
     nvid = 60
     n_exp = int(nvid / 2)
@@ -101,13 +133,22 @@ def custom_objective(y_true, y_pred):
     z_scores = K.stack(z_scores_list)
     z = K.mean(z_scores)
 
-    return z + \
+    y_true = K.clip(y_true, K.epsilon(), 1)
+    y_true_mirror = K.clip(y_pred, K.epsilon(), 1)
+    kl_loss=K.sum(y_true * K.log(y_true / y_true_mirror), axis=-1) + K.sum(y_true_mirror * K.log(y_true_mirror / y_true), axis=-1)
+
+    #print(kl_loss)
+
+    return z  + kl_loss + \
         0.00008*K.sum(temporal_constrains) + \
         0.00008*K.sum(sparsity_constrains)
 
 output_dir = "trained_models/"
-normal_dir = "../processed_c3d_features/train/normal"
-abnormal_dir = "../processed_c3d_features/train/abnormal"
+normal_dir = "C:/Users/dalab/Downloads/full projects/projects/sultani/c3d-32/Train/c3d-normal"
+abnormal_dir = "C:/Users/dalab/Downloads/full projects/projects/sultani/c3d-32/Train/c3d-abnormal"
+
+mirror_normal_dir = "C:/Users/dalab/Downloads/full projects/projects/rtfm/Train/c3d/normal-32"
+mirror_abnormal_dir = "C:/Users/dalab/Downloads/full projects/projects/rtfm/Train/c3d/abnormal-32"
 
 normal_list = os.listdir(normal_dir)
 normal_list.sort()
@@ -136,7 +177,7 @@ time_before = datetime.now()
 
 for it_num in range(num_iters):
     inputs, targets = load_batch_train(
-        normal_dir, normal_list, abnormal_dir, abnormal_list
+        normal_dir, normal_list, abnormal_dir, abnormal_list, mirror_normal_dir, mirror_abnormal_dir
     )
     batch_loss = model.train_on_batch(inputs, targets)
     loss_graph = np.hstack((loss_graph, batch_loss))
